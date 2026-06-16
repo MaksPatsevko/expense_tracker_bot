@@ -23,7 +23,11 @@ async def build_period_report(db: DatabaseRepository, user_id: int, start: date,
         total_income = sum(float(i["amount"]) for i in incomes)
         balance = total_income - total_expense
 
-        text = f"📊 Дані з {start.strftime('%d.%m.%Y')} по {end.strftime('%d.%m.%Y')}:\n\n"
+        if start == end:
+            text = f"📊 Дані за {start.strftime('%d.%m.%Y')}:\n\n"
+        else:
+            text = f"📊 Дані з {start.strftime('%d.%m.%Y')} по {end.strftime('%d.%m.%Y')}:\n\n"
+
         text += f"{Emoji.INCOME_ICON.value} Прибуток: `{total_income:.2f} грн`\n" if incomes else f"{Emoji.INCOME_ICON.value} Прибуток: `0.00 грн`\n"
         text += f"{Emoji.EXPENSE_ICON.value} Витрати: `{total_expense:.2f} грн`\n" if expenses else f"{Emoji.EXPENSE_ICON.value} Витрати: `0.00 грн`\n"
         text += f"🧾 Баланс: `{balance:.2f} грн`\n"
@@ -67,6 +71,7 @@ async def build_period_report(db: DatabaseRepository, user_id: int, start: date,
             text += "\n📌 Витрати відсутні за цей період."
 
         keyboard.append([InlineKeyboardButton(text="🔄 Змінити період", callback_data="change_period")])
+        keyboard.append([InlineKeyboardButton(text="💰 Керувати прибутками", callback_data="manage_incomes")])
         keyboard.append([InlineKeyboardButton(text="📥 Експортувати у CSV", callback_data=f"export_csv:{start}:{end}")])
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 

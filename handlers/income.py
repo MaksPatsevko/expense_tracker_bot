@@ -4,8 +4,9 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from keyboards.reply import main_menu_keyboard, cancel_keyboard
+from keyboards.reply import cancel_keyboard
 from services.db import DatabaseRepository
+from utils.bot_messages import answer_with_main_menu
 from utils.constants import TransactionType, DefaultCategory, Emoji
 
 # Налаштовуємо логер для цього файлу
@@ -17,7 +18,7 @@ class AddIncome(StatesGroup):
     waiting_for_amount = State()
     waiting_for_comment = State()
 
-@router.message(F.text == f"➕ Додати прибуток")
+@router.message(F.text == f"💰 Додати прибуток")
 async def start_income(message: Message, state: FSMContext):
     await message.answer("Введи суму прибутку (наприклад, 1000.50):", reply_markup=cancel_keyboard())
     await state.set_state(AddIncome.waiting_for_amount)
@@ -56,7 +57,7 @@ async def save_income_data(message: Message, state: FSMContext, db: DatabaseRepo
             raw_text=message.text                        # Це коментар користувача
         )
 
-        await message.answer(f"{Emoji.SUCCESS.value} Прибуток успішно збережено!", reply_markup=main_menu_keyboard())
+        await answer_with_main_menu(message, f"{Emoji.SUCCESS.value} Прибуток успішно збережено!")
     except Exception as e:
         # Логуємо помилку замість print
         logger.error("Помилка бази даних при збереженні прибутку (User %s): %s", message.from_user.id, e)

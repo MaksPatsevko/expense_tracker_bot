@@ -9,15 +9,23 @@ from aiogram.types import FSInputFile
 from pathlib import Path
 
 from keyboards.inline import get_limit_options_keyboard, get_category_keyboard, get_limits_main_keyboard
-from keyboards.reply import main_menu_keyboard, cancel_keyboard
+from keyboards.reply import cancel_keyboard
 from services.db import DatabaseRepository
 from utils.chart import generate_limits_bar_chart
+from utils.bot_messages import answer_with_main_menu
 from utils.constants import Emoji
 
 # Налаштовуємо логер
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+def ua_calendar():
+    return SimpleCalendar(
+        locale="uk_UA",
+        cancel_btn="Скасувати",
+        today_btn="Сьогодні"
+    )
 
 class SetLimit(StatesGroup):
     waiting_for_amount = State()
@@ -97,9 +105,17 @@ async def save_limit_amount(message: Message, state: FSMContext, db: DatabaseRep
         target = "УСІ ВИТРАТИ" if not category_name else f"категорію '{category_name}'"
 
         if amount == 0:
-            await message.answer(f"🗑️ Ліміт на **{target}** успішно видалено!", parse_mode="Markdown", reply_markup=main_menu_keyboard())
+            await answer_with_main_menu(
+                message,
+                f"🗑️ Ліміт на **{target}** успішно видалено!",
+                parse_mode="Markdown"
+            )
         else:
-            await message.answer(f"{Emoji.SUCCESS.value} Бюджет успішно встановлено!\nЛіміт на **{target}**: `{amount} грн`", parse_mode="Markdown", reply_markup=main_menu_keyboard())
+            await answer_with_main_menu(
+                message,
+                f"{Emoji.SUCCESS.value} Бюджет успішно встановлено!\nЛіміт на **{target}**: `{amount} грн`",
+                parse_mode="Markdown"
+            )
 
     except Exception as e:
         logger.error("Помилка при збереженні ліміту для юзера %s: %s", message.from_user.id, e)
@@ -157,14 +173,14 @@ async def start_billing_day_setup(callback: CallbackQuery, state: FSMContext):
         "(наприклад, день зарплати). Усі ліміти будуть обнулятися саме в цей день щомісяця.\n\n"
         "*(Місяць та рік не мають значення, бот запам'ятає лише вибране ЧИСЛО)*:",
         parse_mode="Markdown",
-        reply_markup=await SimpleCalendar().start_calendar()
+        reply_markup=await ua_calendar().start_calendar()
     )
     await state.set_state(SetLimit.waiting_for_billing_day)
 
 
 @router.callback_query(SimpleCalendarCallback.filter(), SetLimit.waiting_for_billing_day)
 async def process_billing_day_calendar(callback: CallbackQuery, callback_data: dict, state: FSMContext, db: DatabaseRepository):
-    result, selected_date = await SimpleCalendar().process_selection(callback, callback_data)
+    result, selected_date = await ua_calendar().process_selection(callback, callback_data)
 
     if result:
         day = selected_date.day

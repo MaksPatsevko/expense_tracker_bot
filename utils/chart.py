@@ -72,9 +72,7 @@ def generate_expense_pie_chart(category_sums: dict, start_date: date, end_date: 
 
 def generate_daily_dynamics_chart(expenses: list[dict], start_date: date, end_date: date,
                                   file_path="dynamics_chart.png"):
-    """
-    Малює сучасну стовпчасту діаграму динаміки витрат по днях.
-    """
+
     from collections import defaultdict
     if not expenses:
         return None
@@ -83,42 +81,69 @@ def generate_daily_dynamics_chart(expenses: list[dict], start_date: date, end_da
     plt.close('all')
 
     daily_sums = defaultdict(float)
+
     for exp in expenses:
-        day_str = exp['date'].strftime('%d.%m')
-        daily_sums[day_str] += float(exp['amount'])
+        exp_date = exp['date']
 
-    sorted_days = sorted(daily_sums.keys())
-    sums = [daily_sums[day] for day in sorted_days]
+        if hasattr(exp_date, "date"):
+            exp_date = exp_date.date()
 
-    fig_width = max(8.0, len(sorted_days) * 0.6)
+        daily_sums[exp_date] += float(exp['amount'])
+
+    sorted_dates = sorted(daily_sums.keys())
+
+    ukr_weekdays = {
+        0: "пн",
+        1: "вт",
+        2: "ср",
+        3: "чт",
+        4: "пт",
+        5: "сб",
+        6: "нд",
+    }
+
+    labels = [
+        f"{day.strftime('%d.%m')}({ukr_weekdays[day.weekday()]})"
+        for day in sorted_dates
+    ]
+
+    sums = [daily_sums[day] for day in sorted_dates]
+
+    fig_width = max(8.0, len(labels) * 0.7)
     fig, ax = plt.subplots(figsize=(fig_width, 5.5), facecolor='#F8F9FA')
     ax.set_facecolor('#F8F9FA')
 
-    # Додаємо легку горизонтальну сітку на задній фон
     ax.grid(axis='y', linestyle='--', alpha=0.6, color='#BDC3C7', zorder=0)
 
-    # Малюємо стовпці градієнтним синім кольором (zorder=3 щоб бути поверх сітки)
-    bars = ax.bar(sorted_days, sums, color='#00CFE8', width=0.5, edgecolor='white', linewidth=1.5, zorder=3, alpha=0.9)
+    bars = ax.bar(labels, sums, color='#00CFE8', width=0.5, edgecolor='white', linewidth=1.5, zorder=3, alpha=0.9)
 
-    # Додаємо цифри над стовпцями
     for bar in bars:
         yval = bar.get_height()
         if yval > 0:
-            ax.text(bar.get_x() + bar.get_width() / 2, yval + (max(sums) * 0.03),
-                    f"{yval:g}", ha='center', va='bottom', fontsize=10, fontweight='bold', color='#2C3E50')
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                yval + (max(sums) * 0.03),
+                f"{yval:g}",
+                ha='center',
+                va='bottom',
+                fontsize=10,
+                fontweight='bold',
+                color='#2C3E50'
+            )
 
-    title = f"Статистика витрат по днях"
-    ax.set_title(title, fontsize=15, pad=20, fontweight='bold')
+    ax.set_title("Статистика витрат по днях", fontsize=15, pad=20, fontweight='bold')
 
-    # Ховаємо всі рамки, залишаємо тільки нижню вісь X
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_visible(False)
     ax.spines['bottom'].set_color('#BDC3C7')
     ax.set_yticks([])
 
-    font_size = 10 if len(sorted_days) <= 10 else 8
-    plt.xticks(rotation=0, ha='center', fontsize=font_size)
+    font_size = 10 if len(labels) <= 10 else 8
+    rotation = 0 if len(labels) <= 10 else 30
+    ha = 'center' if len(labels) <= 10 else 'right'
+
+    plt.xticks(rotation=rotation, ha=ha, fontsize=font_size)
     ax.set_ylim(0, max(sums) * 1.2)
 
     plt.tight_layout()
@@ -126,7 +151,6 @@ def generate_daily_dynamics_chart(expenses: list[dict], start_date: date, end_da
     plt.close('all')
 
     return file_path
-
 
 def generate_limits_bar_chart(limits_data: list[dict], period_text: str, file_path="limits_chart.png"):
     """

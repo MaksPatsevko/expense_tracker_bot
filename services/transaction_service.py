@@ -15,7 +15,6 @@ async def process_and_save_transaction(
         trans_type: str,
         description: str,
         source_name: str = "Бот",
-        # ДОДАЛИ ПАРАМЕТР account_name (за замовчуванням Готівка)
         account_name: str = AccountName.CASH.value
 ) -> str:
     """
@@ -23,35 +22,51 @@ async def process_and_save_transaction(
     і формує фінальний текст відповіді для користувача.
     """
     try:
-        # 1. Зберігаємо в БД (ТЕПЕР ПЕРЕДАЄМО account_name!)
         await db.save_transaction(
             user_id=user_id,
             amount=amount,
             category_name=category_name,
             trans_type=trans_type,
             raw_text=description,
-            account_name=account_name  # <--- ВИПРАВЛЕНО ТУТ!
+            account_name=account_name
         )
 
-        # 2. Формуємо базовий текст
         icon = Emoji.INCOME_ICON.value if trans_type == TransactionType.INCOME.value else Emoji.EXPENSE_ICON.value
         action = "Зараховано" if trans_type == TransactionType.INCOME.value else "Витрачено"
+        operation_name = "прибуток" if trans_type == TransactionType.INCOME.value else "витрату"
 
-        response_text = (
-            f"{Emoji.SUCCESS.value} **Збережено ({source_name}):**\n"
-            f"{icon} {action}: `{amount} / {account_name}`\n"  # Додав рахунок у звіт для наочності!
-            f"📁 Категорія: `{category_name}`"
-        )
+        amount_value = float(amount)
+        amount_text = f"{amount_value:.0f}" if amount_value.is_integer() else f"{amount_value:.2f}"
 
-        # 3. Перевіряємо ліміти (тільки для витрат)
+        source_text = ""
+        if source_name == "Monobank":
+            source_text = " (Monobank 🐈)"
+
+        if trans_type == TransactionType.INCOME.value:
+            description_text = " ".join((description or "").split())
+            description_part = f" ({description_text})" if description_text else ""
+
+            response_text = (
+                f"{Emoji.SUCCESS.value} Збережено {operation_name}{source_text}:\n"
+                f"{icon} {action}: {amount_text} грн{description_part}"
+            )
+        else:
+            response_text = (
+                f"{Emoji.SUCCESS.value} Збережено {operation_name}{source_text}:\n"
+                f"{icon} {action}: {amount_text} грн\n"
+                f"📁 Категорія: {category_name}"
+            )
+
         if trans_type == TransactionType.EXPENSE.value:
             category_id = await db.get_category_id_by_name(category_name, user_id)
 
             cat_alert = await check_and_generate_limit_alert(db, user_id, amount, category_id, category_name)
             global_alert = await check_and_generate_limit_alert(db, user_id, amount, None, None)
 
-            if cat_alert: response_text += f"\n\n{cat_alert}"
-            if global_alert: response_text += f"\n\n{global_alert}"
+            if cat_alert:
+                response_text += f"\n\n{cat_alert}"
+            if global_alert:
+                response_text += f"\n\n{global_alert}"
 
         return response_text
 

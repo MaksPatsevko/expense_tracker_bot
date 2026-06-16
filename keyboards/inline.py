@@ -9,6 +9,7 @@ category_icons_map = {
     "Будинок": "🏠",
     "Догляд": "💄",
     "Шопінг": "🛍️",
+    "Кафе та ресторани": "🍽️",
     "Відпочинок": "🏖️",
     "Домашні улюбленці": "🐶",
     "Подарунки": "🎁",
@@ -26,7 +27,6 @@ def get_category_keyboard(categories_data: list[dict], show_manage_buttons: bool
 
     # 1. Додаємо кнопки самих категорій
     for i, cat in enumerate(categories_data, start=1):
-        # Формуємо текст кнопки: "🍔 Продукти" або "📁 Моя Категорія"
         icon = cat.get('icon_emoji') or "📁"
         name = cat['name']
         btn_text = f"{icon} {name}"
@@ -81,9 +81,8 @@ def get_period_view_keyboard():
 def get_expense_categories_keyboard(category_sums: dict):
     keyboard = []
 
-    for category, total in category_sums.items():
-        # Беремо іконку зі словника, якщо немає - ставимо 📁
-        icon = category_icons_map.get(category, "📁")
+    for category, total in sorted(category_sums.items(), key=lambda item: item[1], reverse=True):
+        icon = category_icons_map.get(category, "🏷️")
         button = InlineKeyboardButton(
             text=f"{icon} {category} – {total:g} грн",
             callback_data=f"cat:{category}"
@@ -109,6 +108,32 @@ def get_expense_action_keyboard(expense_id: str):
             [
                 InlineKeyboardButton(text="🔙 Назад", callback_data="back:category_expenses")
             ]
+        ]
+    )
+
+def get_income_list_keyboard(incomes: list[dict]):
+    keyboard = []
+
+    for income in incomes:
+        amount = float(income["amount"])
+        description = " ".join((income.get("description") or "").split())
+        if len(description) > 35:
+            description = f"{description[:32]}..."
+
+        btn_text = f"💰 {amount:g} грн"
+        if description:
+            btn_text += f" — {description}"
+
+        keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"income:{income['id']}")])
+
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад до звіту", callback_data="back:report")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def get_income_action_keyboard(income_id: str):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🗑️ Видалити прибуток", callback_data=f"delete_income:{income_id}")],
+            [InlineKeyboardButton(text="🔙 Назад до прибутків", callback_data="back:incomes")]
         ]
     )
 

@@ -7,6 +7,7 @@ from aiogram.fsm.state import State, StatesGroup
 from services.db import DatabaseRepository
 from keyboards.inline import get_category_keyboard, get_delete_custom_category_keyboard
 from keyboards.reply import cancel_keyboard
+from utils.bot_messages import answer_with_main_menu
 from utils.constants import MAX_CUSTOM_CATEGORIES, Emoji
 
 
@@ -60,20 +61,15 @@ async def save_custom_category(message: Message, state: FSMContext, db: Database
         success = await db.add_custom_category(message.from_user.id, new_name)
 
         if success:
-            # 1. Замість того, щоб знову видавати сітку категорій, ми просто
-            # повідомляємо про успіх і повертаємо Головне Меню (що автоматично затре кнопку "Скасувати").
-            from keyboards.reply import main_menu_keyboard  # Переконайся, що імпорт є
-
-            await message.answer(
+            await answer_with_main_menu(
+                message,
                 f"{Emoji.SUCCESS.value} Категорію '{new_name}' успішно створено!\n"
-                f"Тепер ти можеш використовувати її при додаванні витрат.",
-                reply_markup=main_menu_keyboard()
+                f"Тепер ти можеш використовувати її при додаванні витрат."
             )
         else:
-            from keyboards.reply import main_menu_keyboard
-            await message.answer(
-                f"{Emoji.WARNING.value} Помилка створення або досягнуто ліміту.",
-                reply_markup=main_menu_keyboard()
+            await answer_with_main_menu(
+                message,
+                f"{Emoji.WARNING.value} Помилка створення або досягнуто ліміту."
             )
     except Exception as e:
         logger.error("Помилка при створенні категорії '%s' юзером %s: %s", new_name, message.from_user.id, e)

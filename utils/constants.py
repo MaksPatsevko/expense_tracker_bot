@@ -17,8 +17,8 @@ class Emoji(str, Enum):
     WARNING = "⚠️"
     CRITICAL = "🚨"
     INFO = "ℹ️"
-    EXPENSE_ICON = "🔴"
-    INCOME_ICON = "🟢"
+    EXPENSE_ICON = "💸"
+    INCOME_ICON = "💰"
 
 MAX_CUSTOM_CATEGORIES = 4
 DEFAULT_BILLING_DAY = 1

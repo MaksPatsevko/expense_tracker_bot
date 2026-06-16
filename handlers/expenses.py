@@ -12,22 +12,31 @@ from keyboards.inline import (
     get_category_keyboard,
     get_period_view_keyboard,
     get_expense_action_keyboard,
-    get_back_to_categories_keyboard
+    get_back_to_categories_keyboard,
+    get_income_list_keyboard,
+    get_income_action_keyboard
 )
-from keyboards.inline import get_category_keyboard
-from keyboards.reply import cancel_keyboard, main_menu_keyboard
+from keyboards.reply import cancel_keyboard, optional_description_keyboard
 from services.db import DatabaseRepository
 from services.nlp_parser import parse_transaction_text_ai
 from services.budget_service import check_and_generate_limit_alert
 from services.report import build_period_report
 from services.transaction_service import process_and_save_transaction
 from services.export_service import generate_csv_report
+from utils.bot_messages import answer_with_main_menu
 from utils.constants import TransactionType, DefaultCategory, Emoji
 
 logger = logging.getLogger(__name__)
 router = Router()
 
-@router.message(StateFilter(None), F.text & ~F.text.startswith("/") & ~F.text.in_(["➖ Додати витрату", "➕ Додати прибуток", "⏱️ Переглянути витрати", "💳 Прив'язати банківський рахунок", "⚙️ Налаштування лімітів"]))
+def ua_calendar():
+    return SimpleCalendar(
+        locale="uk_UA",
+        cancel_btn="Скасувати",
+        today_btn="Сьогодні"
+    )
+
+@router.message(StateFilter(None), F.text & ~F.text.startswith("/") & ~F.text.in_(["💸 Додати витрату", "💰 Додати прибуток", "⏱️ Переглянути витрати", "💳 Прив'язати банківський рахунок", "⚙️ Налаштування лімітів"]))
 async def process_nlp_transaction(message: Message, state: FSMContext, db: DatabaseRepository):
     cats_data = await db.get_all_user_categories(message.from_user.id, TransactionType.EXPENSE.value)
     user_categories = [c['name'] for c in cats_data]
@@ -41,7 +50,9 @@ async def process_nlp_transaction(message: Message, state: FSMContext, db: Datab
             parse_mode="Markdown"
         )
 
-    if parsed_data['category'] is None:
+    if parsed_data['type'] == TransactionType.INCOME.value:
+        parsed_data['category'] = DefaultCategory.SALARY.value
+    elif parsed_data['category'] is None:
         parsed_data['category'] = DefaultCategory.OTHER.value
 
     # ВИКЛИК СЕРВІСУ!
@@ -55,10 +66,13 @@ async def process_nlp_transaction(message: Message, state: FSMContext, db: Datab
         source_name="OpenAI"
     )
 
-    if parsed_data['category'] == DefaultCategory.OTHER.value:
+    if (
+            parsed_data['type'] == TransactionType.EXPENSE.value
+            and parsed_data['category'] == DefaultCategory.OTHER.value
+    ):
         response_text += "\n*(Категорію можна змінити в меню 'Переглянути витрати')*"
 
-    await message.answer(response_text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await answer_with_main_menu(message, response_text, parse_mode="Markdown")
 
 # =====================================================================
 # СЦЕНАРІЙ 2: КЛАСИЧНИЙ ВВІД ЧЕРЕЗ КНОПКИ (FSM)
@@ -78,7 +92,7 @@ class CustomPeriod(StatesGroup):
     waiting_for_start = State()
     waiting_for_end = State()
 
-@router.message(F.text == "➖ Додати витрату")
+@router.message(F.text == "💸 Додати витрату")
 async def start_add(message: Message, state: FSMContext):
     await message.answer("Введи суму витрати (наприклад, 150.50):", reply_markup=cancel_keyboard())
     await state.set_state(AddExpense.waiting_for_amount)
@@ -103,7 +117,10 @@ async def get_category_callback(callback: CallbackQuery, state: FSMContext):
     category = callback.data.split("category:")[1]
     await state.update_data(category=category)
     await callback.message.edit_reply_markup()
-    await callback.message.answer("Короткий опис витрати (необов’язково):")
+    await callback.message.answer(
+        "Короткий опис витрати (необов’язково):",
+        reply_markup=optional_description_keyboard()
+    )
     await state.set_state(AddExpense.waiting_for_description)
 
 
@@ -111,18 +128,21 @@ async def get_category_callback(callback: CallbackQuery, state: FSMContext):
 async def get_description(message: Message, state: FSMContext, db: DatabaseRepository):
     data = await state.get_data()
 
-    # ВИКЛИК СЕРВІСУ!
+    description = message.text.strip()
+    if description in ["-", "Без опису"]:
+        description = ""
+
     response_text = await process_and_save_transaction(
         db=db,
         user_id=message.from_user.id,
         amount=data["amount"],
         category_name=data["category"],
         trans_type=TransactionType.EXPENSE.value,
-        description=message.text.strip(),
+        description=description,
         source_name="Ручний ввід"
     )
 
-    await message.answer(response_text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await answer_with_main_menu(message, response_text, parse_mode="Markdown")
     await state.clear()
 
 
@@ -145,13 +165,13 @@ async def handle_period_selection(callback: CallbackQuery, state: FSMContext, db
         start = today - timedelta(days=6)
         end = today
     elif period == "month":
-        start = today.replace(day=1)
-        end = today
+        billing_day = await db.get_user_billing_day(callback.from_user.id)
+        start, end = db.get_financial_period(billing_day)
     elif period == "custom":
         await callback.message.edit_text(
             "Оберіть *початкову дату*:",
             parse_mode="Markdown",
-            reply_markup=await SimpleCalendar().start_calendar()
+            reply_markup=await ua_calendar().start_calendar()
         )
         await state.set_state(CustomPeriod.waiting_for_start)
         return
@@ -205,23 +225,57 @@ async def handle_period_selection(callback: CallbackQuery, state: FSMContext, db
         logger.error("Помилка генерації звіту для юзера %s: %s", callback.from_user.id, e)
         await callback.message.edit_text(f"{Emoji.WARNING.value} Помилка генерації звіту.")
 
+def build_expense_button_text(exp: dict) -> str:
+    amount = float(exp["amount"])
+    amount_text = f"{amount:.0f}" if amount.is_integer() else f"{amount:.2f}"
+
+    desc = " ".join((exp.get("description") or "").split())
+    if len(desc) > 25:
+        desc = f"{desc[:22]}..."
+
+    expense_date = exp.get("date")
+    date_text = expense_date.strftime("%d.%m | %H:%M") if expense_date else ""
+
+    if desc:
+        return f"{amount_text} грн — {desc} ({date_text})"
+
+    return f"{amount_text} грн ({date_text})"
 
 @router.callback_query(SimpleCalendarCallback.filter(), CustomPeriod.waiting_for_start)
 async def process_start_calendar(callback: CallbackQuery, callback_data: dict, state: FSMContext):
-    result, selected_date = await SimpleCalendar().process_selection(callback, callback_data)
+    if callback_data.act == "TODAY":
+        selected_date = datetime.now()
+
+        await state.update_data(start=selected_date)
+        await callback.message.edit_text(
+            "Оберіть *кінцеву дату*:",
+            parse_mode="Markdown",
+            reply_markup=await ua_calendar().start_calendar()
+        )
+        await state.set_state(CustomPeriod.waiting_for_end)
+        await callback.answer()
+        return
+
+    result, selected_date = await ua_calendar().process_selection(callback, callback_data)
+
     if result:
         await state.update_data(start=selected_date)
         await callback.message.edit_text(
             "Оберіть *кінцеву дату*:",
             parse_mode="Markdown",
-            reply_markup=await SimpleCalendar().start_calendar()
+            reply_markup=await ua_calendar().start_calendar()
         )
         await state.set_state(CustomPeriod.waiting_for_end)
 
 
 @router.callback_query(SimpleCalendarCallback.filter(), CustomPeriod.waiting_for_end)
 async def process_end_calendar(callback: CallbackQuery, callback_data: dict, state: FSMContext, db: DatabaseRepository):
-    result, selected_end = await SimpleCalendar().process_selection(callback, callback_data)
+    if callback_data.act == "TODAY":
+        result = True
+        selected_end = datetime.now()
+    else:
+        result, selected_end = await ua_calendar().process_selection(callback, callback_data)
+
     if result:
         selected_end = selected_end.date()
         data = await state.get_data()
@@ -233,8 +287,9 @@ async def process_end_calendar(callback: CallbackQuery, callback_data: dict, sta
         if selected_end < start_date:
             await callback.message.edit_text(
                 f"{Emoji.WARNING.value} Кінцева дата не може бути раніше за початкову. Спробуйте ще раз:",
-                reply_markup=await SimpleCalendar().start_calendar()
+                reply_markup=await ua_calendar().start_calendar()
             )
+            await callback.answer()
             return
 
         await state.update_data(
@@ -243,13 +298,15 @@ async def process_end_calendar(callback: CallbackQuery, callback_data: dict, sta
         )
 
         try:
-            # ЗМІНЕНО: Приймаємо список chart_files
-            text, reply_markup, chart_files = await build_period_report(db, callback.from_user.id, start_date,
-                                                                        selected_end)
+            text, reply_markup, chart_files = await build_period_report(
+                db,
+                callback.from_user.id,
+                start_date,
+                selected_end
+            )
 
             await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
-            # ЗМІНЕНО: Логіка видалення старих повідомлень (альбомів або одиночних)
             data = await state.get_data()
             last_media_group_ids = data.get("last_media_group_ids", [])
 
@@ -263,7 +320,6 @@ async def process_end_calendar(callback: CallbackQuery, callback_data: dict, sta
                 except Exception:
                     pass
 
-            # ЗМІНЕНО: Логіка відправки нових фото
             if chart_files:
                 if len(chart_files) == 1:
                     photo_msg = await callback.message.answer_photo(chart_files[0])
@@ -276,9 +332,12 @@ async def process_end_calendar(callback: CallbackQuery, callback_data: dict, sta
                     msgs = await callback.message.answer_media_group(media=media_group.build())
                     await state.update_data(last_media_group_ids=[m.message_id for m in msgs])
 
+            await callback.answer()
+
         except Exception as e:
             logger.error("Помилка генерації звіту з календаря (User %s): %s", callback.from_user.id, e)
             await callback.message.edit_text(f"{Emoji.WARNING.value} Помилка генерації звіту.")
+            await callback.answer()
 
 @router.callback_query(F.data.startswith("cat:"))
 async def handle_category_click(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
@@ -286,13 +345,17 @@ async def handle_category_click(callback: CallbackQuery, state: FSMContext, db: 
     data = await state.get_data()
 
     if "start_date" not in data or "end_date" not in data:
-        return await callback.message.answer(f"{Emoji.WARNING.value} Обери період перегляду перед фільтрацією за категоріями.")
+        return await callback.message.answer(
+            f"{Emoji.WARNING.value} Обери період перегляду перед фільтрацією за категоріями."
+        )
 
     start = datetime.fromisoformat(data["start_date"]).date()
     end = datetime.fromisoformat(data["end_date"]).date()
 
+    start_text = start.strftime("%d.%m.%Y")
+    end_text = end.strftime("%d.%m.%Y")
+
     try:
-        # Викликаємо метод класу
         transactions = await db.get_transactions_by_period(
             user_id=callback.from_user.id,
             start_date=start,
@@ -303,28 +366,30 @@ async def handle_category_click(callback: CallbackQuery, state: FSMContext, db: 
         filtered = [t for t in transactions if t["category"] == category]
 
         if not filtered:
-            return await callback.message.answer(f"💸 У категорії *{category}* витрат не знайдено.", parse_mode="Markdown")
+            return await callback.message.answer(
+                f"💸 У категорії *{category}* витрат не знайдено.",
+                parse_mode="Markdown"
+            )
 
         await state.update_data(current_category=category)
 
         keyboard = []
         for exp in filtered:
-            desc = exp.get('description', '')
-            btn_text = f"{exp['amount']} грн ({desc})" if desc else f"{exp['amount']} грн"
+            btn_text = build_expense_button_text(exp)
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"expense:{exp['id']}")])
 
         keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back:categories")])
 
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         await callback.message.edit_text(
-            f"📂 Витрати у категорії *{category}* з {start} по {end}:",
+            f"📂 Витрати у категорії *{category}* з {start_text} по {end_text}:",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
+
     except Exception as e:
         logger.error("Помилка фільтрації за категорією (User %s): %s", callback.from_user.id, e)
         await callback.answer(f"{Emoji.WARNING.value} Системна помилка", show_alert=True)
-
 
 @router.callback_query(F.data == "back:categories")
 async def handle_back_to_categories(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
@@ -376,6 +441,150 @@ async def handle_back_to_categories(callback: CallbackQuery, state: FSMContext, 
         logger.error("Помилка повернення до категорій (User %s): %s", callback.from_user.id, e)
         await callback.message.edit_text(f"{Emoji.WARNING.value} Системна помилка.")
 
+
+async def get_selected_period(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    start_str = data.get("start_date")
+    end_str = data.get("end_date")
+
+    if not start_str or not end_str:
+        await callback.message.edit_text(f"{Emoji.WARNING.value} Спочатку обери період.")
+        return None
+
+    start = datetime.fromisoformat(start_str).date()
+    end = datetime.fromisoformat(end_str).date()
+    return start, end
+
+
+async def show_incomes_list(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
+    period = await get_selected_period(callback, state)
+    if not period:
+        return False
+
+    start, end = period
+    incomes = await db.get_transactions_by_period(
+        user_id=callback.from_user.id,
+        start_date=start,
+        end_date=end,
+        trans_type=TransactionType.INCOME.value
+    )
+
+    period_text = f"{start.strftime('%d.%m.%Y')} - {end.strftime('%d.%m.%Y')}"
+    if not incomes:
+        await callback.message.edit_text(
+            f"💰 Прибутків за період {period_text} не знайдено.",
+            reply_markup=get_income_list_keyboard([])
+        )
+        return True
+
+    total_income = sum(float(income["amount"]) for income in incomes)
+    await callback.message.edit_text(
+        f"💰 Прибутки за період {period_text}:\n"
+        f"Усього: {total_income:.2f} грн\n\n"
+        "Обери прибуток, який хочеш видалити:",
+        reply_markup=get_income_list_keyboard(incomes)
+    )
+    return True
+
+
+@router.callback_query(F.data == "manage_incomes")
+async def manage_incomes_handler(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
+    try:
+        await show_incomes_list(callback, state, db)
+    except Exception as e:
+        logger.error("Помилка перегляду прибутків (User %s): %s", callback.from_user.id, e)
+        await callback.message.edit_text(f"{Emoji.WARNING.value} Не вдалося завантажити прибутки.")
+    finally:
+        await callback.answer()
+
+
+@router.callback_query(F.data == "back:incomes")
+async def back_to_incomes_handler(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
+    try:
+        await show_incomes_list(callback, state, db)
+    except Exception as e:
+        logger.error("Помилка повернення до списку прибутків (User %s): %s", callback.from_user.id, e)
+        await callback.message.edit_text(f"{Emoji.WARNING.value} Не вдалося завантажити прибутки.")
+    finally:
+        await callback.answer()
+
+
+@router.callback_query(F.data == "back:report")
+async def back_to_report_handler(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
+    period = await get_selected_period(callback, state)
+    if not period:
+        await callback.answer()
+        return
+
+    start, end = period
+    try:
+        text, reply_markup, _ = await build_period_report(db, callback.from_user.id, start, end)
+        await callback.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    except Exception as e:
+        logger.error("Помилка повернення до звіту (User %s): %s", callback.from_user.id, e)
+        await callback.message.edit_text(f"{Emoji.WARNING.value} Не вдалося оновити звіт.")
+    finally:
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("income:"))
+async def handle_income_click(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
+    income_id = callback.data.split("income:")[1]
+    period = await get_selected_period(callback, state)
+    if not period:
+        await callback.answer()
+        return
+
+    start, end = period
+    try:
+        incomes = await db.get_transactions_by_period(
+            user_id=callback.from_user.id,
+            start_date=start,
+            end_date=end,
+            trans_type=TransactionType.INCOME.value
+        )
+        income = next((item for item in incomes if str(item["id"]) == income_id), None)
+
+        if not income:
+            await callback.answer(f"{Emoji.WARNING.value} Прибуток не знайдено.", show_alert=True)
+            return
+
+        description = (income.get("description") or "").strip()
+        description_text = f"\nОпис: {description}" if description else ""
+
+        await callback.message.edit_text(
+            f"💰 Прибуток: {float(income['amount']):.2f} грн{description_text}\n\n"
+            "Що бажаєш зробити?",
+            reply_markup=get_income_action_keyboard(income_id)
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error("Помилка відкриття прибутку (User %s): %s", callback.from_user.id, e)
+        await callback.answer(f"{Emoji.WARNING.value} Системна помилка.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("delete_income:"))
+async def delete_income_handler(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
+    income_id = int(callback.data.split("delete_income:")[1])
+
+    try:
+        deleted = await db.delete_transaction_by_type(
+            transaction_id=income_id,
+            user_id=callback.from_user.id,
+            trans_type=TransactionType.INCOME.value
+        )
+
+        if not deleted:
+            await callback.answer(f"{Emoji.WARNING.value} Прибуток не знайдено.", show_alert=True)
+            return
+
+        logger.info("Користувач %s видалив прибуток %s", callback.from_user.id, income_id)
+        await show_incomes_list(callback, state, db)
+        await callback.answer("Прибуток видалено.")
+    except Exception as e:
+        logger.error("Помилка видалення прибутку (User %s): %s", callback.from_user.id, e)
+        await callback.answer(f"{Emoji.WARNING.value} Помилка при видаленні.", show_alert=True)
+
 # =====================================================================
 # СЦЕНАРІЙ 4: КЕРУВАННЯ ВИТРАТАМИ (РЕДАГУВАННЯ / ВИДАЛЕННЯ)
 # =====================================================================
@@ -405,8 +614,10 @@ async def back_to_expense_list(callback: CallbackQuery, state: FSMContext, db: D
     start = datetime.fromisoformat(data["start_date"]).date()
     end = datetime.fromisoformat(data["end_date"]).date()
 
+    start_text = start.strftime("%d.%m.%Y")
+    end_text = end.strftime("%d.%m.%Y")
+
     try:
-        # Викликаємо метод класу db
         transactions = await db.get_transactions_by_period(
             user_id=callback.from_user.id,
             start_date=start,
@@ -418,29 +629,27 @@ async def back_to_expense_list(callback: CallbackQuery, state: FSMContext, db: D
 
         keyboard = []
         for exp in filtered:
-            desc = exp.get('description', '')
-            btn_text = f"{exp['amount']} грн ({desc})" if desc else f"{exp['amount']} грн"
+            btn_text = build_expense_button_text(exp)
             keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"expense:{exp['id']}")])
 
         keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back:categories")])
 
         reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
         await callback.message.edit_text(
-            f"📂 Витрати у категорії *{category}* з {start} по {end}:",
+            f"📂 Витрати у категорії *{category}* з {start_text} по {end_text}:",
             reply_markup=reply_markup,
             parse_mode="Markdown"
         )
+
     except Exception as e:
         logger.error("Помилка повернення до списку витрат (User %s): %s", callback.from_user.id, e)
         await callback.answer(f"{Emoji.WARNING.value} Системна помилка.", show_alert=True)
-
 
 @router.callback_query(F.data.startswith("delete_expense:"))
 async def delete_expense_handler(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
     expense_id = int(callback.data.split("delete_expense:")[1])
 
     try:
-        # Видаляємо транзакцію через метод класу db
         await db.delete_transaction(transaction_id=expense_id, user_id=callback.from_user.id)
         logger.info("Користувач %s видалив транзакцію %s", callback.from_user.id, expense_id)
     except Exception as e:
@@ -451,6 +660,9 @@ async def delete_expense_handler(callback: CallbackQuery, state: FSMContext, db:
     category = data.get("current_category")
     start = datetime.fromisoformat(data["start_date"]).date()
     end = datetime.fromisoformat(data["end_date"]).date()
+
+    start_text = start.strftime("%d.%m.%Y")
+    end_text = end.strftime("%d.%m.%Y")
 
     try:
         transactions = await db.get_transactions_by_period(
@@ -470,29 +682,76 @@ async def delete_expense_handler(callback: CallbackQuery, state: FSMContext, db:
             )
 
         keyboard = []
-        for e in filtered:
-            desc = e.get('description', '')
-            btn_text = f"{e['amount']} грн ({desc})" if desc else f"{e['amount']} грн"
-            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"expense:{e['id']}")])
+        for exp in filtered:
+            btn_text = build_expense_button_text(exp)
+            keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"expense:{exp['id']}")])
 
         keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back:categories")])
         markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
 
         await callback.message.edit_text(
-            f"📂 Витрати в категорії *{category}* з {start} по {end}:",
+            f"📂 Витрати в категорії *{category}* з {start_text} по {end_text}:",
             parse_mode="Markdown",
             reply_markup=markup
         )
+
     except Exception as e:
         logger.error("Помилка оновлення списку після видалення (User %s): %s", callback.from_user.id, e)
 
-
 @router.callback_query(F.data.startswith("edit:"))
-async def start_edit_expense(callback: CallbackQuery, state: FSMContext):
+async def start_edit_expense(callback: CallbackQuery, state: FSMContext, db: DatabaseRepository):
     expense_id = callback.data.split("edit:")[1]
     await state.update_data(editing_expense_id=expense_id)
-    await callback.message.answer("✏️ Введи нову суму (наприклад, 150.50):", reply_markup=cancel_keyboard())
+
+    data = await state.get_data()
+    start_str = data.get("start_date")
+    end_str = data.get("end_date")
+
+    expense_title = "витрати"
+
+    if start_str and end_str:
+        try:
+            start = datetime.fromisoformat(start_str).date()
+            end = datetime.fromisoformat(end_str).date()
+
+            transactions = await db.get_transactions_by_period(
+                user_id=callback.from_user.id,
+                start_date=start,
+                end_date=end,
+                trans_type=TransactionType.EXPENSE.value
+            )
+
+            expense = next((item for item in transactions if str(item["id"]) == expense_id), None)
+
+            if expense:
+                amount = float(expense["amount"])
+                amount_text = f"{amount:.0f}" if amount.is_integer() else f"{amount:.2f}"
+
+                desc = " ".join((expense.get("description") or "").split())
+                if desc:
+                    expense_title = f"{amount_text} грн — {desc}"
+                else:
+                    expense_title = f"{amount_text} грн"
+
+        except Exception as e:
+            logger.error("Помилка отримання витрати для редагування (User %s): %s", callback.from_user.id, e)
+
+    await delete_saved_charts(callback.bot, callback.message.chat.id, state)
+
+    try:
+        await callback.message.edit_text(
+            f"✏️ Редагування витрати ({expense_title})"
+        )
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        "Введіть нову суму витрати (наприклад, 150.50):",
+        reply_markup=cancel_keyboard()
+    )
+
     await state.set_state(EditExpense.waiting_for_amount)
+    await callback.answer()
 
 
 @router.message(EditExpense.waiting_for_amount)
@@ -523,6 +782,24 @@ async def edit_category(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer("📝 Тепер введи новий опис (або напиши '-', якщо без опису):")
     await state.set_state(EditExpense.waiting_for_description)
 
+def format_date_ua(value):
+    return value.strftime("%d.%m.%Y")
+
+async def delete_saved_charts(bot, chat_id: int, state: FSMContext):
+    data = await state.get_data()
+    last_media_group_ids = list(data.get("last_media_group_ids", []))
+
+    old_chart_id = data.get("last_chart_message_id")
+    if old_chart_id and old_chart_id not in last_media_group_ids:
+        last_media_group_ids.append(old_chart_id)
+
+    for msg_id in last_media_group_ids:
+        try:
+            await bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass
+
+    await state.update_data(last_media_group_ids=[], last_chart_message_id=None)
 
 @router.message(EditExpense.waiting_for_description)
 async def edit_description(message: Message, state: FSMContext, db: DatabaseRepository):
@@ -531,10 +808,16 @@ async def edit_description(message: Message, state: FSMContext, db: DatabaseRepo
     expense_id = int(data["editing_expense_id"])
     new_amount = data["new_amount"]
     new_category = data["new_category"]
+
     new_description = message.text.strip()
+    if new_description in ["-", "Без опису"]:
+        new_description = ""
+
+    start_str = data.get("start_date")
+    end_str = data.get("end_date")
+    current_category = data.get("current_category")
 
     try:
-        # Викликаємо метод класу db
         await db.update_transaction(
             transaction_id=expense_id,
             new_amount=new_amount,
@@ -542,14 +825,57 @@ async def edit_description(message: Message, state: FSMContext, db: DatabaseRepo
             new_description=new_description,
             user_id=message.from_user.id
         )
-        await message.answer(f"{Emoji.SUCCESS.value} Витрату успішно оновлено!", reply_markup=main_menu_keyboard())
+
+        await delete_saved_charts(message.bot, message.chat.id, state)
+
+        await state.clear()
+
+        context_to_restore = {}
+        if start_str and end_str:
+            context_to_restore["start_date"] = start_str
+            context_to_restore["end_date"] = end_str
+        if current_category:
+            context_to_restore["current_category"] = current_category
+
+        if context_to_restore:
+            await state.update_data(**context_to_restore)
+
+        await answer_with_main_menu(message, f"{Emoji.SUCCESS.value} Витрату успішно оновлено!")
+
+        if start_str and end_str:
+            start = datetime.fromisoformat(start_str).date()
+            end = datetime.fromisoformat(end_str).date()
+
+            text, reply_markup, chart_files = await build_period_report(
+                db,
+                message.from_user.id,
+                start,
+                end
+            )
+
+            await message.answer(
+                text,
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+
+            if chart_files:
+                if len(chart_files) == 1:
+                    photo_msg = await message.answer_photo(chart_files[0])
+                    await state.update_data(last_media_group_ids=[photo_msg.message_id])
+                else:
+                    media_group = MediaGroupBuilder()
+                    for file in chart_files:
+                        media_group.add_photo(media=file)
+
+                    msgs = await message.answer_media_group(media=media_group.build())
+                    await state.update_data(last_media_group_ids=[m.message_id for m in msgs])
+
         logger.info("Користувач %s відредагував транзакцію %s", message.from_user.id, expense_id)
+
     except Exception as e:
         logger.error("Помилка при оновленні транзакції (User %s): %s", message.from_user.id, e)
         await message.answer(f"{Emoji.WARNING.value} Виникла помилка при оновленні бази даних.")
-    finally:
-        await state.clear()
-
 
 @router.callback_query(F.data.startswith("export_csv:"))
 async def export_csv_handler(callback: CallbackQuery, db: DatabaseRepository):
@@ -582,4 +908,5 @@ async def export_csv_handler(callback: CallbackQuery, db: DatabaseRepository):
     else:
         await msg.edit_text("⚠️ Виникла помилка при формуванні звіту.")
 
-    await callback.answer()  # Закриваємо "годинник" на кнопці
+    await callback.answer()
+

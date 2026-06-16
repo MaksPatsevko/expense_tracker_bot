@@ -125,6 +125,19 @@ class DatabaseRepository:
             await conn.execute("DELETE FROM Transactions WHERE transaction_id = $1 AND user_id = $2", transaction_id,
                                user_id)
 
+    async def delete_transaction_by_type(self, transaction_id: int, user_id: int, trans_type: str) -> bool:
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM Transactions
+                WHERE transaction_id = $1
+                  AND user_id = $2
+                  AND transaction_type = $3
+                """,
+                transaction_id, user_id, trans_type
+            )
+            return result == "DELETE 1"
+
 
     def get_financial_period(self, billing_day: int) -> tuple[date, date]:
         """Це звичайний метод (не async), бо він не лізе в БД"""
@@ -231,3 +244,19 @@ class DatabaseRepository:
 
         results.sort(key=lambda x: 0 if x["category"] == "Загальний бюджет" else 1)
         return results
+
+    async def reset_user_data(self, user_id: int):
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM Transactions WHERE user_id = $1", user_id)
+                await conn.execute("DELETE FROM BudgetLimits WHERE user_id = $1", user_id)
+                await conn.execute("DELETE FROM Accounts WHERE user_id = $1", user_id)
+                await conn.execute(
+                    "DELETE FROM Categories WHERE user_id = $1 AND is_custom = TRUE",
+                    user_id
+                )
+                await conn.execute(
+                    "UPDATE Users SET billing_day = $1 WHERE user_id = $2",
+                    DEFAULT_BILLING_DAY,
+                    user_id
+                )
